@@ -56,7 +56,7 @@ image.
 ```
 zpr.:53 {
     zpr {
-        endpoint       https://[fd5a:5052::1]:8182   # admin API base URL; default shown
+        endpoint       https://[fd5a:5052::1]:8182   # admin API base URL; must be https (rejected at startup otherwise); default shown
         api_key_file   /run/secrets/vs-resolve-key   # required; file contents = key string, trailing newline stripped
         tls_ca         /etc/zpr/admin-tls-cert.pem   # required; PEM bundle used to verify the admin cert
         tls_servername vs.zpr                        # optional; SNI/verify name when the cert is not for the IP

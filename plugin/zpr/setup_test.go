@@ -236,3 +236,51 @@ func TestSetupMissingFilesFail(t *testing.T) {
 		})
 	}
 }
+
+func TestSetupNonHTTPSEndpointRejected(t *testing.T) {
+	ca := writeTestCA(t)
+	keyFile := writeTestKeyFile(t)
+
+	for _, ep := range []string{
+		"http://[fd5a:5052::1]:8182",
+		"http://vs.zpr:8182",
+		"ftp://vs.zpr:8182",
+		"vs.zpr:8182", // no scheme
+		"https://",    // scheme but no host
+		"://bad",      // unparseable
+	} {
+		t.Run(ep, func(t *testing.T) {
+			c := caddy.NewTestController("dns", `zpr {
+				endpoint `+ep+`
+				api_key_file `+keyFile+`
+				tls_ca `+ca+`
+			}`)
+			c.ServerBlockKeys = []string{"zpr.:53"}
+			_, err := parseZpr(c)
+			if err == nil {
+				t.Fatalf("parseZpr accepted endpoint %q, want error", ep)
+			}
+			if !strings.Contains(err.Error(), "https") {
+				t.Errorf("error %v does not mention https", err)
+			}
+		})
+	}
+}
+
+func TestSetupHTTPSEndpointAccepted(t *testing.T) {
+	ca := writeTestCA(t)
+	keyFile := writeTestKeyFile(t)
+	c := caddy.NewTestController("dns", `zpr {
+		endpoint https://vs.zpr:8182
+		api_key_file `+keyFile+`
+		tls_ca `+ca+`
+	}`)
+	c.ServerBlockKeys = []string{"zpr.:53"}
+	z, err := parseZpr(c)
+	if err != nil {
+		t.Fatalf("parseZpr rejected https endpoint: %v", err)
+	}
+	if z.Endpoint != "https://vs.zpr:8182" {
+		t.Errorf("Endpoint = %q", z.Endpoint)
+	}
+}

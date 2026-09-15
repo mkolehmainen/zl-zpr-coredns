@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -53,6 +54,9 @@ func parseZpr(c *caddy.Controller) (*Zpr, error) {
 			case "endpoint":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
+				}
+				if err := validateEndpoint(c.Val()); err != nil {
+					return nil, c.Errf("endpoint %q: %v", c.Val(), err)
 				}
 				z.Endpoint = c.Val()
 			case "api_key_file":
@@ -148,4 +152,22 @@ func parseTTLArg(c *caddy.Controller) (uint32, error) {
 		return 0, c.Errf("invalid TTL %q: %v", c.Val(), err)
 	}
 	return uint32(n), nil
+}
+
+// validateEndpoint requires an https URL with a host. Anything else — in
+// particular http — would send the X-API-Key credential in plaintext and
+// bypass the tls_ca verification this plugin guarantees, so it is rejected
+// at setup rather than discovered at query time.
+func validateEndpoint(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("not a valid URL (the admin API endpoint must be an https URL): %v", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("scheme %q is not allowed: the admin API endpoint must use https, so the server certificate is verified against tls_ca and the API key is never sent in plaintext", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("missing host (the admin API endpoint must be an https URL like https://host:port)")
+	}
+	return nil
 }
