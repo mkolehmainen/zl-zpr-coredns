@@ -32,6 +32,20 @@ type serviceAddr struct {
 	ZprAddr string `json:"zpr_addr"`
 }
 
+// maxBodyBytes bounds how much of an admin API response body is read —
+// both when decoding it and when draining it before close so the
+// underlying connection can be reused.
+const maxBodyBytes = 1 << 20
+
+// drainBody consumes up to maxBodyBytes of an unread response body so the
+// Transport sees EOF and returns the connection to the idle pool. Without
+// this, every non-success early return (404s on nonexistent names are
+// normal and high-volume) closes the connection and forces a fresh
+// TCP+TLS handshake on the next lookup.
+func drainBody(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxBodyBytes))
+}
+
 // lookupService resolves a service name via GET /admin/services/{name}.
 // The name must already be lowercased; it is URL-path-encoded here.
 func (z *Zpr) lookupService(ctx context.Context, name string) (netip.Addr, lookupStatus, error) {
@@ -50,15 +64,18 @@ func (z *Zpr) lookupService(ctx context.Context, name string) (netip.Addr, looku
 
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
+		drainBody(resp.Body)
 		return netip.Addr{}, lookupNotFound, nil
 	case resp.StatusCode != http.StatusOK:
+		drainBody(resp.Body)
 		return netip.Addr{}, lookupFailure, fmt.Errorf("admin API returned %s for %q", resp.Status, name)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return netip.Addr{}, lookupFailure, err
 	}
+	drainBody(resp.Body) // discard anything past the limit so the conn is reusable
 	var sd serviceAddr
 	if err := json.Unmarshal(body, &sd); err != nil {
 		return netip.Addr{}, lookupFailure, fmt.Errorf("admin API body for %q is not valid JSON: %w", name, err)

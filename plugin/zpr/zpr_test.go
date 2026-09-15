@@ -29,9 +29,10 @@ const fullDescriptor = `{
 }`
 
 type fakeReq struct {
-	method string
-	path   string
-	apiKey string
+	method     string
+	path       string
+	apiKey     string
+	remoteAddr string
 }
 
 // fakeAdmin is a scripted admin API that records every request it receives.
@@ -50,9 +51,10 @@ func newFakeAdmin(t *testing.T, status int, body string) *fakeAdmin {
 	f.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.reqs = append(f.reqs, fakeReq{
-			method: r.Method,
-			path:   r.URL.Path,
-			apiKey: r.Header.Get("X-API-Key"),
+			method:     r.Method,
+			path:       r.URL.Path,
+			apiKey:     r.Header.Get("X-API-Key"),
+			remoteAddr: r.RemoteAddr,
 		})
 		status, body := f.status, f.body
 		f.mu.Unlock()
@@ -329,3 +331,69 @@ func TestAPIKeyFileTrailingNewlineStripped(t *testing.T) {
 
 // Compile-time check that Zpr is a plugin.Handler.
 var _ plugin.Handler = (*Zpr)(nil)
+
+// remoteAddrs returns the distinct client connections the fake has seen.
+// One distinct RemoteAddr across requests means the client reused the
+// connection; a body closed before EOF forces a new TCP connection.
+func distinctRemoteAddrs(reqs []fakeReq) map[string]bool {
+	set := make(map[string]bool)
+	for _, r := range reqs {
+		set[r.remoteAddr] = true
+	}
+	return set
+}
+
+func TestNotFoundLookupsReuseConnection(t *testing.T) {
+	f := newFakeAdmin(t, http.StatusNotFound, `not found`)
+	z := newTestZpr(f.ts.URL)
+
+	for i := 0; i < 3; i++ {
+		rcode, _ := query(t, z, "nope.zpr.", dns.TypeAAAA)
+		if rcode != dns.RcodeNameError {
+			t.Fatalf("rcode = %d, want NXDOMAIN", rcode)
+		}
+		time.Sleep(10 * time.Millisecond) // let the conn return to the idle pool
+	}
+	reqs := f.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("admin API requests = %d, want 3", len(reqs))
+	}
+	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
+		t.Errorf("404 lookups used %d connections, want 1 (body not drained before close?): %v", len(addrs), addrs)
+	}
+}
+
+func TestErrorStatusLookupsReuseConnection(t *testing.T) {
+	f := newFakeAdmin(t, http.StatusInternalServerError, `boom`)
+	z := newTestZpr(f.ts.URL)
+
+	for i := 0; i < 3; i++ {
+		rcode, _ := query(t, z, "web.zpr.", dns.TypeAAAA)
+		if rcode != dns.RcodeServerFailure {
+			t.Fatalf("rcode = %d, want SERVFAIL", rcode)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addrs := distinctRemoteAddrs(f.requests()); len(addrs) != 1 {
+		t.Errorf("5xx lookups used %d connections, want 1: %v", len(addrs), addrs)
+	}
+}
+
+func TestReadyReusesConnection(t *testing.T) {
+	f := newFakeAdmin(t, http.StatusOK, `[{"service_name":"web"}]`)
+	z := newTestZpr(f.ts.URL)
+
+	for i := 0; i < 3; i++ {
+		if !z.Ready() {
+			t.Fatal("Ready() = false, want true")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reqs := f.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("admin API requests = %d, want 3", len(reqs))
+	}
+	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
+		t.Errorf("Ready() used %d connections, want 1 (list body not drained?): %v", len(addrs), addrs)
+	}
+}

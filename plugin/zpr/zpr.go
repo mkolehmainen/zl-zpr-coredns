@@ -76,7 +76,9 @@ func (z *Zpr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 	return z.writeAnswer(state, addr)
 }
 
-// Ready implements ready.Readiness with one GET /admin/services.
+// Ready implements ready.Readiness with one GET /admin/services. The list
+// body is drained (bounded) rather than decoded so the connection is
+// reusable; only the status code matters here.
 func (z *Zpr) Ready() bool {
 	req, err := http.NewRequest(http.MethodGet, z.Endpoint+"/admin/services", nil)
 	if err != nil {
@@ -88,6 +90,7 @@ func (z *Zpr) Ready() bool {
 		return false
 	}
 	defer resp.Body.Close()
+	drainBody(resp.Body)
 	return resp.StatusCode == http.StatusOK
 }
 
