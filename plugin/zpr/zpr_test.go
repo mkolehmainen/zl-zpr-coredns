@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +36,16 @@ type fakeReq struct {
 	remoteAddr string
 }
 
+// route is one scripted admin API response, keyed by the path prefix that
+// selects it (e.g. "/admin/services/" vs "/admin/hosts/").
+type route struct {
+	status int
+	body   string
+}
+
 // fakeAdmin is a scripted admin API that records every request it receives.
+// When routes is set, a request is answered by the route whose key prefixes
+// its path; otherwise the single default status/body answers everything.
 type fakeAdmin struct {
 	ts *httptest.Server
 
@@ -43,11 +53,21 @@ type fakeAdmin struct {
 	reqs   []fakeReq
 	status int
 	body   string
+	routes map[string]route
 }
 
 func newFakeAdmin(t *testing.T, status int, body string) *fakeAdmin {
 	t.Helper()
-	f := &fakeAdmin{status: status, body: body}
+	return startFakeAdmin(t, &fakeAdmin{status: status, body: body})
+}
+
+func newFakeAdminRoutes(t *testing.T, routes map[string]route) *fakeAdmin {
+	t.Helper()
+	return startFakeAdmin(t, &fakeAdmin{routes: routes})
+}
+
+func startFakeAdmin(t *testing.T, f *fakeAdmin) *fakeAdmin {
+	t.Helper()
 	f.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.reqs = append(f.reqs, fakeReq{
@@ -57,6 +77,12 @@ func newFakeAdmin(t *testing.T, status int, body string) *fakeAdmin {
 			remoteAddr: r.RemoteAddr,
 		})
 		status, body := f.status, f.body
+		for prefix, rt := range f.routes {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				status, body = rt.status, rt.body
+				break
+			}
+		}
 		f.mu.Unlock()
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
@@ -355,8 +381,9 @@ func TestNotFoundLookupsReuseConnection(t *testing.T) {
 		time.Sleep(10 * time.Millisecond) // let the conn return to the idle pool
 	}
 	reqs := f.requests()
-	if len(reqs) != 3 {
-		t.Fatalf("admin API requests = %d, want 3", len(reqs))
+	// Each NXDOMAIN is now two lookups: services 404, then hosts 404.
+	if len(reqs) != 6 {
+		t.Fatalf("admin API requests = %d, want 6", len(reqs))
 	}
 	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
 		t.Errorf("404 lookups used %d connections, want 1 (body not drained before close?): %v", len(addrs), addrs)
@@ -395,5 +422,199 @@ func TestReadyReusesConnection(t *testing.T) {
 	}
 	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
 		t.Errorf("Ready() used %d connections, want 1 (list body not drained?): %v", len(addrs), addrs)
+	}
+}
+
+// fullHostDescriptor is a complete HostDescriptor as served by the admin API
+// (master plan §4). The plugin must read only zpr_addr and ignore the rest.
+const fullHostDescriptor = `{
+	"hostname": "somename",
+	"zpr_addr": "fd5a:5052:adda:2::9",
+	"actor_cn": "somename.zpr"
+}`
+
+// pathsSeen returns the admin API paths the fake saw, in request order.
+func pathsSeen(reqs []fakeReq) []string {
+	paths := make([]string, len(reqs))
+	for i, r := range reqs {
+		paths[i] = r.path
+	}
+	return paths
+}
+
+func assertPaths(t *testing.T, reqs []fakeReq, want ...string) {
+	t.Helper()
+	got := pathsSeen(reqs)
+	if len(got) != len(want) {
+		t.Fatalf("admin API paths = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("admin API paths = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestServiceFoundSkipsHostLookup(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusOK, fullDescriptor},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, m := query(t, z, "web.zpr.", dns.TypeAAAA)
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %d, want NOERROR", rcode)
+	}
+	if len(m.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(m.Answer))
+	}
+	aaaa, ok := m.Answer[0].(*dns.AAAA)
+	if !ok {
+		t.Fatalf("answer is %T, want *dns.AAAA", m.Answer[0])
+	}
+	if got, want := aaaa.AAAA.String(), "fd5a:5052:adda:1::7"; got != want {
+		t.Errorf("AAAA = %s, want %s (service address, not host)", got, want)
+	}
+	assertPaths(t, f.requests(), "/admin/services/web")
+}
+
+func TestHostFoundAfterServiceNotFound(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusNotFound, `not found`},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, m := query(t, z, "somename.zpr.", dns.TypeAAAA)
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %d, want NOERROR", rcode)
+	}
+	if len(m.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(m.Answer))
+	}
+	aaaa, ok := m.Answer[0].(*dns.AAAA)
+	if !ok {
+		t.Fatalf("answer is %T, want *dns.AAAA", m.Answer[0])
+	}
+	if got, want := aaaa.AAAA.String(), "fd5a:5052:adda:2::9"; got != want {
+		t.Errorf("AAAA = %s, want %s (the host's zpr_addr)", got, want)
+	}
+	if aaaa.Hdr.Ttl != z.TTL {
+		t.Errorf("TTL = %d, want %d", aaaa.Hdr.Ttl, z.TTL)
+	}
+	assertPaths(t, f.requests(), "/admin/services/somename", "/admin/hosts/somename")
+}
+
+func TestBothNotFoundIsNxdomain(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusNotFound, `not found`},
+		"/admin/hosts/":    {http.StatusNotFound, `not found`},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, m := query(t, z, "nope.zpr.", dns.TypeAAAA)
+	if rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %d, want NXDOMAIN", rcode)
+	}
+	soa := soaFromAuthority(t, m)
+	if soa.Minttl != z.NegativeTTL {
+		t.Errorf("SOA MINIMUM = %d, want %d", soa.Minttl, z.NegativeTTL)
+	}
+	assertPaths(t, f.requests(), "/admin/services/nope", "/admin/hosts/nope")
+}
+
+func TestAOnExistingHostIsNodata(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusNotFound, `not found`},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, m := query(t, z, "somename.zpr.", dns.TypeA)
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %d, want NOERROR", rcode)
+	}
+	if len(m.Answer) != 0 {
+		t.Fatalf("answers = %d, want 0 (NODATA)", len(m.Answer))
+	}
+	soaFromAuthority(t, m)
+}
+
+func TestServiceFailureNeverFallsThroughToHosts(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusInternalServerError, `boom`},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, _ := query(t, z, "web.zpr.", dns.TypeAAAA)
+	if rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", rcode)
+	}
+	assertPaths(t, f.requests(), "/admin/services/web")
+}
+
+func TestHostLookupFailuresAreServfail(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"500", http.StatusInternalServerError, "boom"},
+		{"401", http.StatusUnauthorized, "no key"},
+		{"non-JSON body", http.StatusOK, "<html>not json</html>"},
+		{"bad zpr_addr", http.StatusOK, `{"zpr_addr": "not-an-address"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAdminRoutes(t, map[string]route{
+				"/admin/services/": {http.StatusNotFound, `not found`},
+				"/admin/hosts/":    {tc.status, tc.body},
+			})
+			z := newTestZpr(f.ts.URL)
+			rcode, _ := query(t, z, "somename.zpr.", dns.TypeAAAA)
+			if rcode != dns.RcodeServerFailure {
+				t.Fatalf("rcode = %d, want SERVFAIL", rcode)
+			}
+			assertPaths(t, f.requests(), "/admin/services/somename", "/admin/hosts/somename")
+		})
+	}
+}
+
+func TestHostNameIsLowercasedBeforeLookup(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusNotFound, `not found`},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	rcode, _ := query(t, z, "SOMENAME.zpr.", dns.TypeAAAA)
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %d, want NOERROR", rcode)
+	}
+	assertPaths(t, f.requests(), "/admin/services/somename", "/admin/hosts/somename")
+}
+
+func TestHostLookupReusesConnection(t *testing.T) {
+	f := newFakeAdminRoutes(t, map[string]route{
+		"/admin/services/": {http.StatusNotFound, `not found`},
+		"/admin/hosts/":    {http.StatusOK, fullHostDescriptor},
+	})
+	z := newTestZpr(f.ts.URL)
+
+	for i := 0; i < 3; i++ {
+		rcode, _ := query(t, z, "somename.zpr.", dns.TypeAAAA)
+		if rcode != dns.RcodeSuccess {
+			t.Fatalf("rcode = %d, want NOERROR", rcode)
+		}
+		time.Sleep(10 * time.Millisecond) // let the conn return to the idle pool
+	}
+	reqs := f.requests()
+	if len(reqs) != 6 {
+		t.Fatalf("admin API requests = %d, want 6", len(reqs))
+	}
+	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
+		t.Errorf("service-404-then-host lookups used %d connections, want 1: %v", len(addrs), addrs)
 	}
 }

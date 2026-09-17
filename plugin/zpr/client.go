@@ -12,22 +12,26 @@ import (
 	"strings"
 )
 
-// lookupStatus classifies the outcome of an admin API service lookup.
+// lookupStatus classifies the outcome of an admin API name lookup
+// (service or host).
 type lookupStatus int
 
 const (
 	// lookupFound: 200 with valid JSON and a parseable zpr_addr.
 	lookupFound lookupStatus = iota
-	// lookupNotFound: 404 — no such service. Maps to NXDOMAIN.
+	// lookupNotFound: 404 — no such name in that namespace. After the
+	// service lookup it means "try hosts"; after the host lookup it maps
+	// to NXDOMAIN.
 	lookupNotFound
 	// lookupFailure: anything else — 5xx, 401/403, transport error,
 	// non-JSON body, unparseable zpr_addr. Maps to SERVFAIL, never NXDOMAIN.
 	lookupFailure
 )
 
-// serviceAddr is the slice of ServiceDescriptor (Contract 1) the plugin
-// consumes. Only zpr_addr is decoded; every other field is deliberately
-// ignored so future additions to the descriptor do not break the plugin.
+// serviceAddr is the slice of ServiceDescriptor (Contract 1) — and equally
+// of HostDescriptor (master plan §4) — that the plugin consumes. Only
+// zpr_addr is decoded; every other field is deliberately ignored so future
+// additions to either descriptor do not break the plugin.
 type serviceAddr struct {
 	ZprAddr string `json:"zpr_addr"`
 }
@@ -49,7 +53,20 @@ func drainBody(body io.Reader) {
 // lookupService resolves a service name via GET /admin/services/{name}.
 // The name must already be lowercased; it is URL-path-encoded here.
 func (z *Zpr) lookupService(ctx context.Context, name string) (netip.Addr, lookupStatus, error) {
-	u := z.Endpoint + "/admin/services/" + url.PathEscape(name)
+	return z.lookup(ctx, "/admin/services/", name)
+}
+
+// lookupHost resolves a machine (host) name via GET /admin/hosts/{name}.
+// The name must already be lowercased; it is URL-path-encoded here.
+func (z *Zpr) lookupHost(ctx context.Context, name string) (netip.Addr, lookupStatus, error) {
+	return z.lookup(ctx, "/admin/hosts/", name)
+}
+
+// lookup performs one admin API name lookup under the given path prefix.
+// Status mapping, body limiting, draining and zpr_addr decoding are shared
+// by the service and host lookups, which differ only in the path.
+func (z *Zpr) lookup(ctx context.Context, pathPrefix, name string) (netip.Addr, lookupStatus, error) {
+	u := z.Endpoint + pathPrefix + url.PathEscape(name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return netip.Addr{}, lookupFailure, err
