@@ -1,8 +1,9 @@
 # zl-zpr-coredns
 
-A CoreDNS plugin (`zpr`) that resolves ZPR service names to ZPR addresses.
-It answers `AAAA <service>.<zone>` by calling the visa service admin API
-`GET /admin/services/{name}` and returning the service's `zpr_addr`. The
+A CoreDNS plugin (`zpr`) that resolves ZPR service and machine (host) names
+to ZPR addresses. It answers `AAAA <name>.<zone>` by calling the visa
+service admin API — `GET /admin/services/{name}` first, and on a 404 there
+`GET /admin/hosts/{name}` — returning the matching record's `zpr_addr`. The
 plugin is stateless per query — positive caching is CoreDNS's stock `cache`
 plugin, which `plugin.cfg` places directly before `zpr`.
 
@@ -187,16 +188,35 @@ certificate is always verified against `tls_ca`.
 
 | Query | Behaviour |
 |---|---|
-| `<service>.<zone>` AAAA | `GET /admin/services/<service>` (name lowercased, URL-path-encoded); 200 → one AAAA with `zpr_addr`, TTL = `ttl` |
-| `<service>.<zone>` other type, service exists | NOERROR, no answers, SOA in authority (NODATA) |
-| Service not found (404) | NXDOMAIN, SOA in authority with MINIMUM = `negative_ttl` |
+| `<name>.<zone>` AAAA | `GET /admin/services/<name>` (name lowercased, URL-path-encoded); on 404, `GET /admin/hosts/<name>`; 200 → one AAAA with `zpr_addr`, TTL = `ttl` |
+| `<name>.<zone>` other type, name exists (service or host) | NOERROR, no answers, SOA in authority (NODATA) |
+| Neither service nor host found (404 + 404) | NXDOMAIN, SOA in authority with MINIMUM = `negative_ttl` |
 | Two or more labels under the zone (`a.b.<zone>`) | NXDOMAIN, **no HTTP call** |
 | Admin API failure (5xx, 401/403, unreachable, non-JSON, bad `zpr_addr`) | **SERVFAIL**, never NXDOMAIN |
 | `<zone>` SOA / NS | Synthesized apex records |
 | Out-of-zone name | Passed to the next plugin |
 
-The plugin reads **only** `zpr_addr` from the `ServiceDescriptor`; every
-other field is ignored so future additions do not break it.
+### Resolution order
+
+Services and machine names share **one flat namespace** under the zone, and
+a service name always wins — the service lookup runs first, and the host
+lookup is attempted only when the service lookup answered a clean 404:
+
+| service lookup | host lookup | answer |
+|---|---|---|
+| found | (not attempted) | AAAA `zpr_addr`, or NODATA for non-AAAA |
+| 404 | found | AAAA `zpr_addr`, or NODATA for non-AAAA |
+| 404 | 404 | NXDOMAIN + SOA |
+| failure | (not attempted) | SERVFAIL |
+| 404 | failure | SERVFAIL |
+
+A *failed* (non-404) service lookup never falls through to hosts: a
+hostname can never shadow or substitute for a service, even when the
+service lookup is erroring.
+
+The plugin reads **only** `zpr_addr` from the `ServiceDescriptor` and
+`HostDescriptor`; every other field is ignored so future additions do not
+break it.
 
 Readiness (`Ready()`) probes `GET /admin/services`.
 
@@ -209,6 +229,9 @@ GET {endpoint}/admin/services/{name}     X-API-Key: <key>
   403  key lacks permission
   404  no such service, or no current provider
   500  server error
+GET {endpoint}/admin/hosts/{name}        X-API-Key: <key>
+  200  HostDescriptor { hostname, zpr_addr, actor_cn }
+  401/403/404/500 as above
 GET {endpoint}/admin/services            (readiness probe only)
   200  NamedListEntry[]  { "id": string }
 ```
