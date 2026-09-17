@@ -1,7 +1,10 @@
-// Package zpr answers AAAA queries for <service>.<zone> by asking the ZPR
-// visa service admin API (GET /admin/services/{name}) and returning the
-// service's zpr_addr. It is stateless per query; positive caching is left to
-// CoreDNS's stock cache plugin.
+// Package zpr answers AAAA queries for <name>.<zone> by asking the ZPR
+// visa service admin API and returning the name's zpr_addr. A name is
+// resolved as a service first (GET /admin/services/{name}); only when the
+// service lookup answers 404 is it then tried as a machine name
+// (GET /admin/hosts/{name}). Services and hosts share one flat namespace
+// and a service name always wins. The plugin is stateless per query;
+// positive caching is left to CoreDNS's stock cache plugin.
 package zpr
 
 import (
@@ -38,10 +41,11 @@ type Zpr struct {
 func (z *Zpr) Name() string { return "zpr" }
 
 // ServeDNS implements plugin.Handler per the name-semantics table:
-// apex SOA/NS synthesized; one label under the zone -> service lookup
-// (AAAA -> zpr_addr, other types NODATA); two or more labels -> NXDOMAIN
-// without an HTTP call; 404 -> NXDOMAIN; any other admin API failure ->
-// SERVFAIL; out-of-zone -> next plugin.
+// apex SOA/NS synthesized; one label under the zone -> service lookup,
+// then on service 404 a host lookup (AAAA -> zpr_addr, other types
+// NODATA); both 404 -> NXDOMAIN; two or more labels -> NXDOMAIN without
+// an HTTP call; any admin API failure -> SERVFAIL, and a failed service
+// lookup never falls through to hosts; out-of-zone -> next plugin.
 func (z *Zpr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
@@ -62,10 +66,17 @@ func (z *Zpr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 	}
 
 	addr, status, err := z.lookupService(ctx, rel)
-	switch status {
-	case lookupNotFound:
-		return z.writeNxdomain(state, zone)
-	case lookupFailure:
+	if status == lookupNotFound {
+		// Not a service: try it as a machine name. This second lookup
+		// runs only on a clean 404 — a *failed* service lookup is
+		// SERVFAIL below and never falls through to hosts, so a
+		// hostname can never substitute for a service.
+		addr, status, err = z.lookupHost(ctx, rel)
+		if status == lookupNotFound {
+			return z.writeNxdomain(state, zone)
+		}
+	}
+	if status == lookupFailure {
 		return dns.RcodeServerFailure, plugin.Error(z.Name(), err)
 	}
 

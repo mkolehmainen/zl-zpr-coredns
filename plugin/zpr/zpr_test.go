@@ -381,8 +381,9 @@ func TestNotFoundLookupsReuseConnection(t *testing.T) {
 		time.Sleep(10 * time.Millisecond) // let the conn return to the idle pool
 	}
 	reqs := f.requests()
-	if len(reqs) != 3 {
-		t.Fatalf("admin API requests = %d, want 3", len(reqs))
+	// Each NXDOMAIN is now two lookups: services 404, then hosts 404.
+	if len(reqs) != 6 {
+		t.Fatalf("admin API requests = %d, want 6", len(reqs))
 	}
 	if addrs := distinctRemoteAddrs(reqs); len(addrs) != 1 {
 		t.Errorf("404 lookups used %d connections, want 1 (body not drained before close?): %v", len(addrs), addrs)
