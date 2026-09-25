@@ -160,7 +160,7 @@ nothing in ZPR configures that for them.
 `zl-zpr-demo/dns-demo` is a complete worked example: container, key minting,
 policy, and an end-to-end `dig` test.
 
-## Corefile syntax (Contract 3)
+## Corefile syntax
 
 ```
 zpr.:53 {
@@ -220,7 +220,7 @@ break it.
 
 Readiness (`Ready()`) probes `GET /admin/services`.
 
-## Admin API consumed (Contract 1)
+## Admin API consumed
 
 ```
 GET {endpoint}/admin/services/{name}     X-API-Key: <key>

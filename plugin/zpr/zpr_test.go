@@ -19,7 +19,8 @@ import (
 )
 
 // fullDescriptor is a complete ServiceDescriptor as served by the admin API
-// (Contract 1). The plugin must read only zpr_addr and ignore the rest.
+// (README.md, "Admin API consumed"). The plugin must read only zpr_addr and
+// ignore the rest.
 const fullDescriptor = `{
 	"service_name": "web",
 	"actor_cn": "web.zpr",
@@ -426,7 +427,8 @@ func TestReadyReusesConnection(t *testing.T) {
 }
 
 // fullHostDescriptor is a complete HostDescriptor as served by the admin API
-// (master plan §4). The plugin must read only zpr_addr and ignore the rest.
+// (README.md, "Admin API consumed"). The plugin must read only zpr_addr and
+// ignore the rest.
 const fullHostDescriptor = `{
 	"hostname": "somename",
 	"zpr_addr": "fd5a:5052:adda:2::9",
