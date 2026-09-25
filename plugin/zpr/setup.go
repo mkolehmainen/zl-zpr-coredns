@@ -29,8 +29,8 @@ func setup(c *caddy.Controller) error {
 	return nil
 }
 
-// parseZpr parses the Corefile stanza per Contract 3. The API key file is
-// read once here, at setup; the zone comes from the server block.
+// parseZpr parses the Corefile stanza per README.md, "Corefile syntax".
+// The API key file is read once here, at setup; the zone comes from the server block.
 func parseZpr(c *caddy.Controller) (*Zpr, error) {
 	z := &Zpr{
 		Endpoint:    "https://[fd5a:5052::1]:8182",

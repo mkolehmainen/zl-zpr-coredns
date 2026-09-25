@@ -28,8 +28,9 @@ const (
 	lookupFailure
 )
 
-// serviceAddr is the slice of ServiceDescriptor (Contract 1) — and equally
-// of HostDescriptor (master plan §4) — that the plugin consumes. Only
+// serviceAddr is the slice of ServiceDescriptor — and equally of
+// HostDescriptor (both in zl-zpr-visaservice/admin-http-api.txt; see
+// README.md, "Admin API consumed") — that the plugin consumes. Only
 // zpr_addr is decoded; every other field is deliberately ignored so future
 // additions to either descriptor do not break the plugin.
 type serviceAddr struct {
